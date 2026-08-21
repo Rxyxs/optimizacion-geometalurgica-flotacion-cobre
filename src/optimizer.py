@@ -65,6 +65,16 @@ if not hasattr(creator, "FitnessMax"):
 if not hasattr(creator, "Individual"):
     creator.create("Individual", list, fitness=creator.FitnessMax)
 
+# --- Multi-objetivo (Cu y Mo simultaneos) ---
+PARETO_POPULATION_SIZE = 60  # NSGA-II via selTournamentDCD requiere multiplo de 4
+PARETO_N_GENERATIONS = 30
+MAX_BLOCKS_PARETO = 30  # menor que MAX_BLOCKS_TO_OPTIMIZE: cada frente de Pareto es mas costoso de leer
+
+if not hasattr(creator, "FitnessMulti"):
+    creator.create("FitnessMulti", base.Fitness, weights=(1.0, 1.0))
+if not hasattr(creator, "IndividualMulti"):
+    creator.create("IndividualMulti", list, fitness=creator.FitnessMulti)
+
 
 def rebuild_feature_matrix(
     context: dict, ph: np.ndarray, collector: np.ndarray, frother: np.ndarray, p80: np.ndarray
@@ -197,6 +207,157 @@ def run_genetic_algorithm(
     return result
 
 
+def _evaluate_population_multi(
+    population: np.ndarray, model, context: dict
+) -> tuple[list[tuple[float, float]], np.ndarray, np.ndarray]:
+    """Version multi-objetivo de `_evaluate_population`: fitness = (Cu, Mo), mismo castigo
+    de presupuesto aplicado a ambos objetivos."""
+    ph, collector, frother, p80 = population[:, 0], population[:, 1], population[:, 2], population[:, 3]
+    X = rebuild_feature_matrix(context, ph, collector, frother, p80)
+    preds = model.predict(X)  # columna 0 = Cu, columna 1 = Mo
+
+    cost = _reagent_cost_usd_per_t(collector, frother)
+    penalty = BUDGET_PENALTY_WEIGHT * np.clip(cost - REAGENT_BUDGET_USD_PER_T, 0.0, None)
+    cu_fit = preds[:, 0] - penalty
+    mo_fit = preds[:, 1] - penalty
+    fitnesses = list(zip(cu_fit.tolist(), mo_fit.tolist()))
+    return fitnesses, preds, cost
+
+
+def run_pareto_genetic_algorithm(
+    context: dict,
+    model,
+    bounds: list[tuple[float, float]] = DECISION_BOUNDS,
+    population_size: int = PARETO_POPULATION_SIZE,
+    n_generations: int = PARETO_N_GENERATIONS,
+    seed: int | None = None,
+) -> list[dict]:
+    """NSGA-II: frente de Pareto de soluciones (pH, colector, espumante, P80) que maximizan
+    Cu y Mo simultaneamente, sin dominar una solucion a la otra en ambos objetivos a la vez.
+
+    A diferencia de `run_genetic_algorithm` (un solo optimo), esto devuelve TODAS las
+    soluciones no dominadas: el operador elige el punto del trade-off Cu/Mo que prefiera.
+    """
+    rng_local = random.Random(seed)
+    toolbox = base.Toolbox()
+
+    def _init_individual():
+        return creator.IndividualMulti([rng_local.uniform(lo, hi) for lo, hi in bounds])
+
+    toolbox.register("individual", _init_individual)
+    toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+    toolbox.register("mate", tools.cxBlend, alpha=0.5)
+    toolbox.register(
+        "mutate", tools.mutGaussian, mu=0.0, sigma=[(hi - lo) * 0.12 for lo, hi in bounds], indpb=0.4
+    )
+    toolbox.register("select", tools.selNSGA2)
+
+    population = toolbox.population(n=population_size)
+    pop_array = np.array(population, dtype=np.float64)
+    fitnesses, _, _ = _evaluate_population_multi(pop_array, model, context)
+    for ind, fit in zip(population, fitnesses):
+        ind.fitness.values = fit
+    population = toolbox.select(population, len(population))  # asigna crowding distance
+
+    for _ in range(n_generations):
+        offspring = [toolbox.clone(ind) for ind in tools.selTournamentDCD(population, len(population))]
+
+        for c1, c2 in zip(offspring[::2], offspring[1::2]):
+            if rng_local.random() <= CXPB:
+                toolbox.mate(c1, c2)
+            toolbox.mutate(c1)
+            toolbox.mutate(c2)
+            del c1.fitness.values
+            del c2.fitness.values
+
+        for ind in offspring:
+            _clip_individual(ind, bounds)
+
+        offspring_array = np.array(offspring, dtype=np.float64)
+        fitnesses, _, _ = _evaluate_population_multi(offspring_array, model, context)
+        for ind, fit in zip(offspring, fitnesses):
+            ind.fitness.values = fit
+
+        population = toolbox.select(population + offspring, population_size)
+
+    # Recalcula predicciones/costos reales (no penalizados) para reportar el frente final.
+    final_array = np.array(population, dtype=np.float64)
+    final_fitnesses, final_preds, final_costs = _evaluate_population_multi(final_array, model, context)
+    info_by_id = {}
+    for i, ind in enumerate(population):
+        ind.fitness.values = final_fitnesses[i]
+        info_by_id[id(ind)] = (final_preds[i], final_costs[i])
+
+    pareto_front = tools.sortNondominated(population, len(population), first_front_only=True)[0]
+
+    results = []
+    seen_genomes: set[tuple[float, ...]] = set()
+    for ind in pareto_front:
+        genome_key = tuple(round(v, 2) for v in ind)
+        if genome_key in seen_genomes:
+            continue
+        seen_genomes.add(genome_key)
+        pred, cost = info_by_id[id(ind)]
+        results.append(
+            {
+                "ph": ind[0],
+                "collector_g_t": ind[1],
+                "frother_g_t": ind[2],
+                "p80_um": ind[3],
+                "cu_recovery_pred": float(pred[0]),
+                "mo_recovery_pred": float(pred[1]),
+                "reagent_cost_usd_per_t": float(cost),
+            }
+        )
+
+    results.sort(key=lambda r: -r["cu_recovery_pred"])
+    return results
+
+
+def run_pareto_prescriptive_engine(
+    df: pl.DataFrame,
+    model,
+    threshold: float = RECOVERY_THRESHOLD_PCT,
+    max_blocks: int = MAX_BLOCKS_PARETO,
+) -> pl.DataFrame:
+    """Para los `max_blocks` bloques de menor Cu predicho, calcula el frente de Pareto
+    Cu-vs-Mo completo (en vez de un unico optimo de Cu)."""
+    X_all = df.select(FEATURE_COLUMNS).to_numpy()
+    cu_pred_all = model.predict(X_all)[:, 0]
+
+    candidates = df.with_columns(pl.Series("predicted_cu_recovery_pct", cu_pred_all))
+    targets = candidates.filter(pl.col("predicted_cu_recovery_pct") < threshold).sort(
+        "predicted_cu_recovery_pct"
+    ).head(max_blocks)
+
+    print(f"[Optimizer/Pareto] Calculando frente de Pareto Cu-vs-Mo para {targets.height} bloques...")
+
+    records = []
+    for i, row in enumerate(targets.iter_rows(named=True)):
+        context = {col: row[col] for col in CONTEXT_COLUMNS}
+        solutions = run_pareto_genetic_algorithm(context, model, seed=5000 + i)
+
+        for rank, sol in enumerate(solutions):
+            records.append(
+                {
+                    "block_id": row["block_id"],
+                    "solution_rank": rank,
+                    "ph": round(sol["ph"], 3),
+                    "collector_g_t": round(sol["collector_g_t"], 2),
+                    "frother_g_t": round(sol["frother_g_t"], 2),
+                    "p80_um": round(sol["p80_um"], 1),
+                    "cu_recovery_pred_pct": round(sol["cu_recovery_pred"], 3),
+                    "mo_recovery_pred_pct": round(sol["mo_recovery_pred"], 3),
+                    "reagent_cost_usd_per_t": round(sol["reagent_cost_usd_per_t"], 4),
+                }
+            )
+
+        if (i + 1) % 10 == 0 or (i + 1) == targets.height:
+            print(f"  [Optimizer/Pareto] {i + 1}/{targets.height} bloques procesados")
+
+    return pl.DataFrame(records)
+
+
 def run_prescriptive_engine(
     df: pl.DataFrame,
     model,
@@ -261,13 +422,24 @@ def main() -> None:
     recommendations.write_parquet(out_path)
     recommendations.write_csv(REPORTS_DIR / "optimization_recommendations.csv")
 
-    print(f"\nBloques optimizados: {recommendations.height}")
+    print(f"\nBloques optimizados (objetivo unico, Cu): {recommendations.height}")
     if recommendations.height > 0:
         print(f"Uplift promedio de recuperacion: {recommendations['recovery_uplift_pct'].mean():.2f} pp")
         print(f"Costo de reactivos promedio (actual -> recomendado): "
               f"{recommendations['current_reagent_cost_usd_per_t'].mean():.4f} -> "
               f"{recommendations['recommended_reagent_cost_usd_per_t'].mean():.4f} USD/t")
     print(f"Guardado en: {out_path}")
+
+    pareto = run_pareto_prescriptive_engine(df, ensemble)
+    pareto_path = REPORTS_DIR / "pareto_recommendations.parquet"
+    pareto.write_parquet(pareto_path)
+    pareto.write_csv(REPORTS_DIR / "pareto_recommendations.csv")
+
+    n_pareto_blocks = pareto["block_id"].n_unique() if pareto.height else 0
+    print(f"\nBloques con frente de Pareto Cu-vs-Mo: {n_pareto_blocks}")
+    if pareto.height > 0:
+        print(f"Soluciones promedio por frente: {pareto.height / n_pareto_blocks:.1f}")
+    print(f"Guardado en: {pareto_path}")
 
 
 if __name__ == "__main__":
