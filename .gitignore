@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+.pytest_cache/
+*.egg-info/
+
+# Datos y artefactos generados (se regeneran con python -m src.master_pipeline)
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+outputs/models/*
+!outputs/models/.gitkeep
+outputs/reports/*
+!outputs/reports/.gitkeep
+outputs/plots/*
+!outputs/plots/.gitkeep
+
+# CatBoost training logs
+catboost_info/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
