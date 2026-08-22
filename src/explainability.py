@@ -32,7 +32,7 @@ import shap
 
 from src.feature_engineering import FEATURE_COLUMNS, TARGET_COLUMNS
 from src.modeling import GeometallurgicalEnsemble  # noqa: F401 -- requerido por joblib.load
-from src.optimizer import RECOVERY_THRESHOLD_PCT
+from src.optimizer import CONTEXT_COLUMNS, RECOVERY_THRESHOLD_PCT, rebuild_feature_matrix
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 PROCESSED_DIR = ROOT_DIR / "data" / "processed"
@@ -45,6 +45,8 @@ TOP_N_GLOBAL = 15
 TOP_N_LOSS_DRIVERS = 10
 TOP_N_LOCAL_FEATURES = 5
 TOP_N_BLOCKS_FOR_LOCAL_EXPLANATION = 10
+TOP_N_BLOCKS_FOR_PARETO_SHAP = 10
+TOP_N_PARETO_SHAP_FEATURES = 8
 
 sns.set_theme(style="whitegrid")
 
@@ -86,6 +88,114 @@ def explain_block_local(shap_row: np.ndarray, feature_names: list[str], top_n: i
     return [
         {"feature": feature_names[i], "shap_value": round(float(shap_row[i]), 4)} for i in order
     ]
+
+
+def explain_pareto_solution(
+    ensemble: GeometallurgicalEnsemble, context: dict, solution: dict, top_n: int = TOP_N_PARETO_SHAP_FEATURES
+) -> dict:
+    """SHAP local (Cu y Mo) para UNA solucion especifica del frente de Pareto.
+
+    Reconstruye el vector de features en el punto de operacion recomendado
+    (contexto geologico fijo del bloque + variables de decision de esa
+    solucion) y explica, con el mismo `TreeExplainer` que la importancia
+    global, por que ese punto predice lo que predice para cada metal.
+    """
+    X = rebuild_feature_matrix(
+        context,
+        np.array([solution["ph"]]),
+        np.array([solution["collector_g_t"]]),
+        np.array([solution["frother_g_t"]]),
+        np.array([solution["p80_um"]]),
+    )
+    X_df = pd.DataFrame(X, columns=FEATURE_COLUMNS)
+    cu_shap_row = compute_shap_for_target(ensemble, X_df, target_idx=0)[0]
+    mo_shap_row = compute_shap_for_target(ensemble, X_df, target_idx=1)[0]
+    return {
+        "cu_top_features": explain_block_local(cu_shap_row, FEATURE_COLUMNS, top_n=top_n),
+        "mo_top_features": explain_block_local(mo_shap_row, FEATURE_COLUMNS, top_n=top_n),
+    }
+
+
+def build_pareto_shap_explanations(
+    ensemble: GeometallurgicalEnsemble,
+    pareto_df: pl.DataFrame,
+    features_df: pl.DataFrame,
+    max_blocks: int = TOP_N_BLOCKS_FOR_PARETO_SHAP,
+) -> list[dict]:
+    """Para cada bloque con frente de Pareto, explica sus dos soluciones extremas:
+    la de maxima recuperacion de Cu y la de maxima recuperacion de Mo."""
+    if pareto_df.height == 0:
+        return []
+
+    block_ids = pareto_df["block_id"].unique(maintain_order=True).to_list()[:max_blocks]
+    explanations = []
+
+    for block_id in block_ids:
+        block_solutions = pareto_df.filter(pl.col("block_id") == block_id).sort("solution_rank")
+        cu_max = block_solutions.row(0, named=True)  # rank 0 = mejor Cu (ordenado al construir el frente)
+        mo_max = block_solutions.row(-1, named=True)  # ultimo rank = mejor Mo
+
+        context_row = features_df.filter(pl.col("block_id") == block_id).row(0, named=True)
+        context = {col: context_row[col] for col in CONTEXT_COLUMNS}
+
+        cu_shap = explain_pareto_solution(ensemble, context, cu_max)
+        mo_shap = explain_pareto_solution(ensemble, context, mo_max)
+
+        explanations.append(
+            {
+                "block_id": block_id,
+                "cu_max_solution": {
+                    "ph": cu_max["ph"],
+                    "collector_g_t": cu_max["collector_g_t"],
+                    "frother_g_t": cu_max["frother_g_t"],
+                    "p80_um": cu_max["p80_um"],
+                    "cu_recovery_pred_pct": cu_max["cu_recovery_pred_pct"],
+                    "mo_recovery_pred_pct": cu_max["mo_recovery_pred_pct"],
+                    "shap_explanation": cu_shap,
+                },
+                "mo_max_solution": {
+                    "ph": mo_max["ph"],
+                    "collector_g_t": mo_max["collector_g_t"],
+                    "frother_g_t": mo_max["frother_g_t"],
+                    "p80_um": mo_max["p80_um"],
+                    "cu_recovery_pred_pct": mo_max["cu_recovery_pred_pct"],
+                    "mo_recovery_pred_pct": mo_max["mo_recovery_pred_pct"],
+                    "shap_explanation": mo_shap,
+                },
+            }
+        )
+
+    return explanations
+
+
+def save_pareto_shap_plot(block_id: str, cu_max_explanation: dict, mo_max_explanation: dict) -> Path:
+    """Compara, para un bloque representativo, que features explican la solucion 'maxima Cu'
+    (prediccion de Cu) vs. la solucion 'maxima Mo' (prediccion de Mo) -- visualiza por que
+    el frente de Pareto trae un trade-off, no solo que existe."""
+    cu_df = pd.DataFrame(cu_max_explanation["cu_top_features"]).sort_values("shap_value")
+    mo_df = pd.DataFrame(mo_max_explanation["mo_top_features"]).sort_values("shap_value")
+
+    fig, axes = plt.subplots(1, 2, figsize=(15, 6))
+    fig.suptitle(f"Explicabilidad SHAP del frente de Pareto — bloque {block_id}", fontsize=14, fontweight="bold")
+
+    colors_cu = ["#C0392B" if v < 0 else "#B87333" for v in cu_df["shap_value"]]
+    axes[0].barh(cu_df["feature"], cu_df["shap_value"], color=colors_cu)
+    axes[0].set_title("Solucion 'maxima Cu' — contribucion a la prediccion de Cu")
+    axes[0].axvline(0, color="black", linewidth=0.8)
+    axes[0].set_xlabel("Valor SHAP")
+
+    colors_mo = ["#C0392B" if v < 0 else "#6A8CAF" for v in mo_df["shap_value"]]
+    axes[1].barh(mo_df["feature"], mo_df["shap_value"], color=colors_mo)
+    axes[1].set_title("Solucion 'maxima Mo' — contribucion a la prediccion de Mo")
+    axes[1].axvline(0, color="black", linewidth=0.8)
+    axes[1].set_xlabel("Valor SHAP")
+
+    plt.tight_layout()
+    PLOTS_DIR.mkdir(parents=True, exist_ok=True)
+    path = PLOTS_DIR / "pareto_shap_comparison.png"
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    return path
 
 
 def save_dashboard(
@@ -146,7 +256,11 @@ def save_dashboard(
 
 
 def _build_report_text_es(
-    metrics: dict, cu_importance: pd.DataFrame, cu_loss_drivers: pd.DataFrame, recommendations: pl.DataFrame
+    metrics: dict,
+    cu_importance: pd.DataFrame,
+    cu_loss_drivers: pd.DataFrame,
+    recommendations: pl.DataFrame,
+    pareto_explanations: list[dict],
 ) -> str:
     top_feature = cu_importance.iloc[0]["feature"]
     top_loss_driver = cu_loss_drivers.iloc[0]["feature"] if len(cu_loss_drivers) else "N/D"
@@ -154,6 +268,19 @@ def _build_report_text_es(
     uplift_mean = recommendations["recovery_uplift_pct"].mean() if n_opt else 0.0
     r2_cu = metrics["ensemble"]["cu_recovery_pct"]["r2_mean"]
     r2_mo = metrics["ensemble"]["mo_recovery_pct"]["r2_mean"]
+
+    pareto_paragraph = ""
+    if pareto_explanations:
+        sample = pareto_explanations[0]
+        cu_top = sample["cu_max_solution"]["shap_explanation"]["cu_top_features"][0]["feature"]
+        mo_top = sample["mo_max_solution"]["shap_explanation"]["mo_top_features"][0]["feature"]
+        pareto_paragraph = (
+            f"El motor multi-objetivo (NSGA-II) calcula, para cada bloque de baja recuperacion, el frente "
+            f"de Pareto completo del trade-off Cu-vs-Mo. Para el bloque de ejemplo '{sample['block_id']}', "
+            f"la solucion que maximiza Cu depende principalmente de '{cu_top}', mientras que la solucion "
+            f"que maximiza Mo depende principalmente de '{mo_top}' -- SHAP muestra que ambas soluciones "
+            f"llegan a su optimo por caminos distintos, no solo con valores de recuperacion distintos.\n\n"
+        )
 
     return (
         "RESUMEN GEOMETALURGICO — OPTIMIZACION DE FLOTACION Cu-Mo\n"
@@ -169,6 +296,7 @@ def _build_report_text_es(
         f"recuperacion y recomendo ajustes de pH, dosificacion de reactivos y P80 que en promedio "
         f"elevarian la recuperacion de Cu predicha en {uplift_mean:.2f} puntos porcentuales, sin exceder "
         f"el presupuesto de insumos definido.\n\n"
+        f"{pareto_paragraph}"
         "Recomendacion operativa: priorizar la revision de los bloques listados en "
         "'optimization_recommendations.csv', comenzando por los de mayor uplift potencial, y validar "
         "en planta los ajustes de pH y P80 antes de modificar la dosificacion de reactivos."
@@ -176,7 +304,11 @@ def _build_report_text_es(
 
 
 def _build_report_text_en(
-    metrics: dict, cu_importance: pd.DataFrame, cu_loss_drivers: pd.DataFrame, recommendations: pl.DataFrame
+    metrics: dict,
+    cu_importance: pd.DataFrame,
+    cu_loss_drivers: pd.DataFrame,
+    recommendations: pl.DataFrame,
+    pareto_explanations: list[dict],
 ) -> str:
     top_feature = cu_importance.iloc[0]["feature"]
     top_loss_driver = cu_loss_drivers.iloc[0]["feature"] if len(cu_loss_drivers) else "N/A"
@@ -184,6 +316,19 @@ def _build_report_text_en(
     uplift_mean = recommendations["recovery_uplift_pct"].mean() if n_opt else 0.0
     r2_cu = metrics["ensemble"]["cu_recovery_pct"]["r2_mean"]
     r2_mo = metrics["ensemble"]["mo_recovery_pct"]["r2_mean"]
+
+    pareto_paragraph = ""
+    if pareto_explanations:
+        sample = pareto_explanations[0]
+        cu_top = sample["cu_max_solution"]["shap_explanation"]["cu_top_features"][0]["feature"]
+        mo_top = sample["mo_max_solution"]["shap_explanation"]["mo_top_features"][0]["feature"]
+        pareto_paragraph = (
+            f"The multi-objective engine (NSGA-II) computes, for each low-recovery block, the full "
+            f"Cu-vs-Mo Pareto trade-off front. For the example block '{sample['block_id']}', the "
+            f"Cu-maximizing solution depends primarily on '{cu_top}', while the Mo-maximizing solution "
+            f"depends primarily on '{mo_top}' -- SHAP shows both solutions reach their optimum through "
+            f"different mechanisms, not just different recovery values.\n\n"
+        )
 
     return (
         "GEOMETALLURGICAL SUMMARY — Cu-Mo FLOTATION OPTIMIZATION\n"
@@ -198,6 +343,7 @@ def _build_report_text_en(
         f"The prescriptive optimization engine (Genetic Algorithm) processed {n_opt} low-recovery blocks "
         f"and recommended pH, reagent dosage, and P80 adjustments that would raise predicted Cu recovery "
         f"by {uplift_mean:.2f} percentage points on average, without exceeding the defined reagent budget.\n\n"
+        f"{pareto_paragraph}"
         "Operational recommendation: prioritize reviewing the blocks listed in "
         "'optimization_recommendations.csv', starting with the highest potential uplift, and validate "
         "the pH and P80 adjustments in-plant before modifying reagent dosing."
@@ -261,6 +407,20 @@ def main() -> None:
     )
     print(f"\nDashboard guardado en: {png_path} / {pdf_path}")
 
+    pareto_path = REPORTS_DIR / "pareto_recommendations.parquet"
+    pareto_df = pl.read_parquet(pareto_path) if pareto_path.exists() else pl.DataFrame()
+
+    print(f"Calculando SHAP para {min(TOP_N_BLOCKS_FOR_PARETO_SHAP, pareto_df['block_id'].n_unique() if pareto_df.height else 0)} frentes de Pareto...")
+    pareto_explanations = build_pareto_shap_explanations(ensemble, pareto_df, df)
+
+    pareto_shap_plot_path = None
+    if pareto_explanations:
+        sample = pareto_explanations[0]
+        pareto_shap_plot_path = save_pareto_shap_plot(
+            sample["block_id"], sample["cu_max_solution"]["shap_explanation"], sample["mo_max_solution"]["shap_explanation"]
+        )
+        print(f"Grafico SHAP de Pareto guardado en: {pareto_shap_plot_path}")
+
     report = {
         "model_metrics": metrics,
         "shap_global_importance_cu": cu_importance.to_dict(orient="records"),
@@ -269,12 +429,13 @@ def main() -> None:
         "n_blocks_optimized": recommendations.height,
         "mean_recovery_uplift_pct": float(recommendations["recovery_uplift_pct"].mean()) if recommendations.height else None,
         "local_explanations_top_blocks": local_explanations,
+        "pareto_shap_explanations": pareto_explanations,
     }
     with open(REPORTS_DIR / "geometallurgical_report.json", "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2, ensure_ascii=False)
 
-    text_es = _build_report_text_es(metrics, cu_importance, cu_loss_drivers, recommendations)
-    text_en = _build_report_text_en(metrics, cu_importance, cu_loss_drivers, recommendations)
+    text_es = _build_report_text_es(metrics, cu_importance, cu_loss_drivers, recommendations, pareto_explanations)
+    text_en = _build_report_text_en(metrics, cu_importance, cu_loss_drivers, recommendations, pareto_explanations)
     (REPORTS_DIR / "summary_es.txt").write_text(text_es, encoding="utf-8")
     (REPORTS_DIR / "summary_en.txt").write_text(text_en, encoding="utf-8")
 

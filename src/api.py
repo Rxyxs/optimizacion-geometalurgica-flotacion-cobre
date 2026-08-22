@@ -9,12 +9,20 @@ Requiere haber corrido `python -m src.master_pipeline` (o al menos
 `data_generator` + `wrangling` + `feature_engineering` + `modeling`)
 al menos una vez, para que existan los artefactos que este servicio carga.
 
+Requiere autenticacion por API key (header `X-API-Key`) en todos los
+endpoints salvo `/health`, y aplica rate-limiting por IP.
+
 Ejecutar desde la raiz del repositorio con:
     uvicorn src.api:app --reload
+
+Variables de entorno:
+    GEOMET_API_KEY     API key esperada (default: "dev-key-change-me").
+    GEOMET_RATE_LIMIT  Limite por IP, formato de `slowapi` (default: "60/minute").
 """
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -23,7 +31,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import joblib
 import numpy as np
 import polars as pl
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Security
+from fastapi.security import APIKeyHeader
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+from slowapi.util import get_remote_address
 
 from src.feature_engineering import FEATURE_COLUMNS
 from src.modeling import GeometallurgicalEnsemble  # noqa: F401 -- requerido por joblib.load
@@ -40,6 +53,9 @@ MODELS_DIR = ROOT_DIR / "outputs" / "models"
 
 FEATURES_PATH = PROCESSED_DIR / "block_model_flotation_features.parquet"
 MODEL_PATH = MODELS_DIR / "geometallurgical_ensemble.joblib"
+
+API_KEY = os.environ.get("GEOMET_API_KEY", "dev-key-change-me")
+RATE_LIMIT = os.environ.get("GEOMET_RATE_LIMIT", "60/minute")
 
 
 def _require(path: Path) -> Path:
@@ -63,15 +79,32 @@ ALL_SCORES = features_df.select(["block_id"]).with_columns(
     ]
 )
 
+_api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+def require_api_key(key: str | None = Security(_api_key_header)) -> None:
+    if key != API_KEY:
+        raise HTTPException(
+            status_code=401,
+            detail="API key invalida o ausente. Envia el header 'X-API-Key'.",
+        )
+
+
+limiter = Limiter(key_func=get_remote_address, default_limits=[RATE_LIMIT])
+
 app = FastAPI(
     title="Geometallurgical Flotation Optimization API",
     description=(
         "Scoring de Recuperacion Cu/Mo y recomendaciones de optimizacion (Algoritmo "
         "Genetico, objetivo unico y frente de Pareto) en tiempo real, sobre el ultimo "
-        "dataset procesado por master_pipeline.py."
+        "dataset procesado por master_pipeline.py. Requiere API key (header 'X-API-Key') "
+        "en todos los endpoints salvo /health."
     ),
-    version="1.0.0",
+    version="1.1.0",
 )
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)
 
 
 def _risk_level(cu_pred: float) -> str:
@@ -98,7 +131,7 @@ def health() -> dict:
     return {"status": "ok", "n_blocks": features_df.height}
 
 
-@app.get("/blocks/at-risk")
+@app.get("/blocks/at-risk", dependencies=[Depends(require_api_key)])
 def list_at_risk_blocks(limit: int = 50) -> list[dict]:
     """Bloques con Cu predicho bajo el umbral de negocio, ordenados de peor a mejor."""
     at_risk = ALL_SCORES.filter(pl.col("cu_recovery_pred_pct") < RECOVERY_THRESHOLD_PCT).sort(
@@ -107,7 +140,7 @@ def list_at_risk_blocks(limit: int = 50) -> list[dict]:
     return at_risk.head(limit).to_dicts()
 
 
-@app.get("/blocks/{block_id}/score")
+@app.get("/blocks/{block_id}/score", dependencies=[Depends(require_api_key)])
 def score_block(block_id: str) -> dict:
     match = ALL_SCORES.filter(pl.col("block_id") == block_id)
     if match.height == 0:
@@ -121,7 +154,7 @@ def score_block(block_id: str) -> dict:
     }
 
 
-@app.get("/blocks/{block_id}/optimize")
+@app.get("/blocks/{block_id}/optimize", dependencies=[Depends(require_api_key)])
 def optimize_block(block_id: str) -> dict:
     """Algoritmo Genetico de objetivo unico: maximiza Cu sujeto al presupuesto de reactivos."""
     row = _get_block_row(block_id)
@@ -143,7 +176,7 @@ def optimize_block(block_id: str) -> dict:
     }
 
 
-@app.get("/blocks/{block_id}/optimize/pareto")
+@app.get("/blocks/{block_id}/optimize/pareto", dependencies=[Depends(require_api_key)])
 def optimize_block_pareto(block_id: str) -> dict:
     """NSGA-II: frente de Pareto completo del trade-off Cu-vs-Mo para este bloque."""
     row = _get_block_row(block_id)

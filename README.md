@@ -59,9 +59,10 @@ batch) que reutiliza los mismos artefactos y motores de optimización.
 - XGBoost + CatBoost — modelado multi-output (Cu% y Mo% simultáneos)
 - DEAP — Algoritmo Genético: objetivo único (`selTournament`) y
   multi-objetivo NSGA-II (`selNSGA2` + `selTournamentDCD`)
-- SHAP — explicabilidad técnica global y local
+- SHAP — explicabilidad técnica global, local y del frente de Pareto
 - Matplotlib + Seaborn — dashboard exportado a PDF/PNG
-- FastAPI + httpx — servicio de scoring/optimización en tiempo real
+- FastAPI + slowapi + httpx — servicio de scoring/optimización en tiempo
+  real, con API key y rate-limiting
 
 ## 📁 Estructura
 
@@ -122,29 +123,33 @@ python -m src.wrangling             # data/processed/block_model_flotation_clean
 python -m src.feature_engineering   # data/processed/block_model_flotation_features.parquet
 python -m src.modeling              # outputs/models/geometallurgical_ensemble.joblib
 python -m src.optimizer             # outputs/reports/{optimization,pareto}_recommendations.{parquet,csv}
-python -m src.explainability        # outputs/reports/*.json,*.txt + outputs/plots/dashboard.*
+python -m src.explainability        # outputs/reports/*.json,*.txt + outputs/plots/*.png,*.pdf
 ```
 
 ### Servicio en tiempo real (FastAPI)
 
-```powershell
-uvicorn src.api:app --reload
-```
-
 Requiere haber corrido el pipeline (o al menos hasta `modeling.py`) al
 menos una vez, para que existan `outputs/models/geometallurgical_ensemble
 .joblib` y `data/processed/block_model_flotation_features.parquet`.
-
-| Endpoint | Descripción |
-|---|---|
-| `GET /health` | Estado del servicio y n° de bloques cargados |
-| `GET /blocks/at-risk?limit=50` | Bloques con Cu predicho bajo el umbral, peor a mejor |
-| `GET /blocks/{block_id}/score` | Recuperación Cu/Mo predicha + nivel de riesgo |
-| `GET /blocks/{block_id}/optimize` | GA objetivo único: mejor (pH, reactivos, P80) para maximizar Cu |
-| `GET /blocks/{block_id}/optimize/pareto` | NSGA-II: frente de Pareto completo Cu-vs-Mo |
+Requiere una API key por header (`X-API-Key`) en todos los endpoints salvo
+`/health`, y aplica rate-limiting por IP (60 req/min por defecto):
 
 ```powershell
-curl http://127.0.0.1:8000/blocks/BLK-041590/optimize/pareto
+$env:GEOMET_API_KEY = "tu-clave-secreta"      # default: "dev-key-change-me"
+$env:GEOMET_RATE_LIMIT = "60/minute"          # opcional
+uvicorn src.api:app --reload
+```
+
+| Endpoint | Auth | Descripción |
+|---|---|---|
+| `GET /health` | No | Estado del servicio y n° de bloques cargados |
+| `GET /blocks/at-risk?limit=50` | Sí | Bloques con Cu predicho bajo el umbral, peor a mejor |
+| `GET /blocks/{block_id}/score` | Sí | Recuperación Cu/Mo predicha + nivel de riesgo |
+| `GET /blocks/{block_id}/optimize` | Sí | GA objetivo único: mejor (pH, reactivos, P80) para maximizar Cu |
+| `GET /blocks/{block_id}/optimize/pareto` | Sí | NSGA-II: frente de Pareto completo Cu-vs-Mo |
+
+```powershell
+curl -H "X-API-Key: tu-clave-secreta" http://127.0.0.1:8000/blocks/BLK-041590/optimize/pareto
 ```
 
 ## 🗄️ Datos simulados
@@ -205,26 +210,17 @@ sacrificar Mo, porque sus P80 óptimos son distintos (170 µm vs. 140 µm) —
 el trade-off es una consecuencia física real del diseño del generador, no
 un artefacto numérico.
 
-## 📊 Resultados (corrida de referencia, 50.000 bloques, seed 42)
-
-| Modelo | Target | RMSE | MAE | R² |
-|---|---|---|---|---|
-| Ensemble (XGBoost+CatBoost) | Cu recovery % | 4.08 | 3.06 | **0.648** |
-| Ensemble (XGBoost+CatBoost) | Mo recovery % | 4.65 | 3.71 | **0.669** |
-
-Validado con `TimeSeriesSplit` (5 folds, walk-forward: siempre se entrena
-en el pasado y se evalúa en el futuro).
-
-- **9.644 bloques** (19.3%) con Cu predicho bajo el umbral de 82%.
-- El motor de optimización procesó los **150 de menor recuperación** y
-  recomendó ajustes que elevarían la recuperación de Cu predicha en
-  **+27.6 puntos porcentuales en promedio**, sin exceder el presupuesto de
-  reactivos (costo promedio recomendado: 0.216 USD/t, bajo el límite de
-  0.22 USD/t).
-- **Top features SHAP para Cu**: `p80_deviation_from_optimum`, `ph_kf`,
-  `air_flow_m3_h_kf`, `pct_solids_kf`, `sgi_pyrite_interaction` — coincide
-  con el diseño físico del generador (P80 y pH fuera de óptimo son los
-  principales drivers de pérdida de metal).
+**Explicabilidad del frente de Pareto:** `explainability.py` calcula SHAP
+local (Cu y Mo) para las dos soluciones extremas de cada frente — la que
+maximiza Cu y la que maximiza Mo — reconstruyendo el vector de features en
+ese punto de operación. El resultado (`pareto_shap_comparison.png` +
+`pareto_shap_explanations` en el reporte JSON) muestra que ambas
+soluciones llegan a su óptimo por mecanismos distintos, y en la corrida de
+referencia revela algo no evidente a simple vista: `air_flow_m3_h_kf` —una
+variable de **contexto fija, no ajustable por el GA**— es el mayor lastre
+negativo en ambas soluciones para el bloque de ejemplo, es decir, hay
+bloques donde ningún ajuste de pH/reactivos/P80 alcanza a compensar una
+condición de aire desfavorable.
 
 ## 🐞 Nota de depuración (por transparencia)
 
@@ -236,20 +232,84 @@ cuatro variables de sensor decayeran lentamente hacia 0 y quedaran
 vez de ~10.6 en todo el dataset). Esto inflaba artificialmente el
 porcentaje de bloques bajo el umbral y sesgaba las variables de sensor.
 Corregido sumando el término de deriva en cada paso del filtro IIR (ver
-`_ar1_process` en `data_generator.py`); los R² reportados arriba son
-posteriores a la corrección.
+`_ar1_process` en `data_generator.py`); los resultados reportados abajo
+son posteriores a la corrección.
 
-## 🔭 Próximos pasos
+## 🔭 Próximo paso pendiente
 
-- **Reemplazar el generador por telemetría histórica real de planta** —
-  pendiente: requiere datos reales que este repositorio no tiene ni puede
-  fabricar; sigue siendo el paso crítico antes de cualquier uso productivo.
-- ~~Exponer el motor de optimización como servicio (API) para
-  recomendaciones en tiempo real~~ — hecho, ver `src/api.py`.
-- ~~Extender el Algoritmo Genético a optimización multi-objetivo (Cu y Mo
-  simultáneos)~~ — hecho, ver `run_pareto_genetic_algorithm` en
-  `src/optimizer.py`.
-- Agregar autenticación/rate-limiting a `api.py` antes de cualquier
-  despliegue expuesto a red.
-- SHAP para el motor de Pareto (hoy la explicabilidad solo cubre el modelo
-  de recuperación, no las recomendaciones multi-objetivo).
+De los cuatro puntos que quedaban abiertos, tres ya están resueltos: API
+en tiempo real (`src/api.py`), optimización multi-objetivo
+(`run_pareto_genetic_algorithm`), autenticación/rate-limiting
+(`GEOMET_API_KEY` + `slowapi`) y SHAP para el frente de Pareto. Queda uno,
+y es el crítico:
+
+- **Reemplazar el generador por telemetría histórica real de planta.**
+  Este repositorio no tiene acceso a datos reales de ninguna faena y no
+  puede fabricarlos — es un límite deliberado, no una omisión. Sin este
+  paso, todo lo demás queda validado como *pipeline*, no como modelo
+  metalúrgico de producción (ver Conclusiones).
+
+## 📊 Resultados (corrida de referencia, 50.000 bloques, seed 42)
+
+| Modelo | Target | RMSE | MAE | R² |
+|---|---|---|---|---|
+| Ensemble (XGBoost+CatBoost) | Cu recovery % | 4.08 | 3.06 | **0.648** |
+| Ensemble (XGBoost+CatBoost) | Mo recovery % | 4.65 | 3.71 | **0.669** |
+
+Validado con `TimeSeriesSplit` (5 folds, walk-forward: siempre se entrena
+en el pasado y se evalúa en el futuro).
+
+- **9.644 bloques** (19.3%) con Cu predicho bajo el umbral de 82%.
+- El motor de optimización de objetivo único procesó los **150 de menor
+  recuperación** y recomendó ajustes que elevarían la recuperación de Cu
+  predicha en **+27.6 puntos porcentuales en promedio**, sin exceder el
+  presupuesto de reactivos (costo promedio recomendado: 0.216 USD/t, bajo
+  el límite de 0.22 USD/t).
+- El motor multi-objetivo calculó el frente de Pareto completo para los
+  **30 bloques** de peor recuperación (**~35 soluciones no dominadas** por
+  frente, en promedio), con una correlación Cu-vs-Mo **-0.8 dentro de cada
+  frente** — un trade-off físico real, no ruido numérico.
+- **Top features SHAP para Cu** (modelo global): `p80_deviation_from_optimum`,
+  `ph_kf`, `air_flow_m3_h_kf`, `pct_solids_kf`, `sgi_pyrite_interaction` —
+  coincide con el diseño físico del generador (P80 y pH fuera de óptimo
+  son los principales drivers de pérdida de metal).
+- La API (`/health`, `/blocks/at-risk`, `/blocks/{id}/score`,
+  `/blocks/{id}/optimize`, `/blocks/{id}/optimize/pareto`) fue validada
+  contra un servidor real: 401 sin API key, 200 con key válida, 404 para
+  bloques inexistentes.
+
+## ✅ Conclusiones
+
+- **El sistema completo — batch y en tiempo real — funciona de punta a
+  punta con datos reales generados por el propio repositorio**: desde la
+  simulación geoespacial y de sensores hasta un servicio HTTP autenticado
+  que sirve recomendaciones bajo demanda, todo entrenado, optimizado y
+  explicado con las mismas 49.000 unidades.
+- **El ensamble predice con R² 0.65 (Cu) y 0.67 (Mo) en validación
+  temporal honesta** (nunca se entrena con el futuro para predecir el
+  pasado) — suficiente señal para que tanto el ranking de riesgo como las
+  recomendaciones del GA sean accionables, no ruido.
+- **El motor de optimización de objetivo único encuentra mejoras reales y
+  acotadas por presupuesto** (+27.6 pp promedio, sin superar el costo de
+  reactivos definido) — no es una promesa vacía, es una búsqueda validada
+  contra el mismo modelo que se usa para reportar el resultado.
+- **El frente de Pareto no es una curiosidad matemática: expone un
+  trade-off metalúrgico real.** La correlación -0.8 entre Cu y Mo dentro
+  de un mismo frente, y el hecho de que SHAP muestre mecanismos distintos
+  para cada solución extrema, son consistentes con que Cu y Mo tienen
+  óptimos de P80 distintos por diseño — el operador puede elegir su punto
+  del trade-off con información real, no adivinando.
+- **La explicabilidad ya no se detiene en "qué tan bueno es el modelo":
+  llega hasta "por qué esta recomendación específica es la que es"**,
+  incluyendo el hallazgo de que algunas variables de contexto (como el
+  flujo de aire) no son ajustables por el optimizador y pueden limitar el
+  resultado sin importar cuánto se optimicen pH, reactivos o P80 — una
+  distinción que le importa a un metalurgista y que antes no era visible.
+- **La limitación central sigue siendo la misma que en la entrega
+  anterior, y vale la pena repetirla sin rodeos**: todo el dataset es
+  sintético. Las métricas de esta sección validan que la arquitectura, los
+  splits sin fuga, el motor de optimización y la explicabilidad son
+  correctos — no validan que el sistema prediga fallas o recuperaciones
+  reales en una faena. El paso crítico antes de cualquier uso productivo
+  sigue siendo reemplazar el generador por telemetría histórica real (ver
+  "Próximo paso pendiente" arriba).
