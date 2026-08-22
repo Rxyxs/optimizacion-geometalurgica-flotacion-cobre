@@ -1,12 +1,10 @@
 # optimizacion-geometalurgica-flotacion-cobre
 
-Pipeline monolítico ("Single-Phase Master Pipeline") de optimización
-geometalúrgica para flotación de **Cobre (Cu)** y **Molibdeno (Mo)**:
-simula un block model + telemetría de celda de flotación, limpia y
-enriquece los datos, entrena un ensamble multi-output de Recuperación,
-ejecuta un motor de optimización prescriptiva (Algoritmo Genético) para
-bloques de baja recuperación, y genera explicabilidad SHAP + un reporte
-bilingüe (ES/EN) — todo con **un solo comando**, sin intervención humana.
+# Optimización Geometalúrgica en Plantas de Flotación (Cu/Mo)
+
+Sistema automatizado *end-to-end* diseñado para predecir y optimizar la recuperación de Cobre (Cu) y Molibdeno (Mo) en procesos de flotación. El proyecto cruza información del modelo de bloques geológicos con telemetría de celdas en tiempo real para resolver pérdidas de metal en relaves.
+
+Aplica procesamiento de señales para limpiar el ruido de lectura en planta, entrena un ensamble *multi-output* de gradiente boosting y ejecuta un motor prescriptivo basado en algoritmos genéticos que sugiere ajustes exactos de reactivos y pH para bloques mineralógicos complejos. Todo el flujo (ingesta, ingeniería de variables, modelado, optimización y explicabilidad SHAP) se ejecuta de principio a fin desde un único comando (`python -m src.master_pipeline`).
 
 ## 🎯 Problema de negocio
 
