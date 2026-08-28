@@ -23,7 +23,14 @@ outputs/plots/*
 # CatBoost training logs
 catboost_info/
 
+# Jupyter
+.ipynb_checkpoints/
+
 # Editor / OS
 .vscode/
 .idea/
 .DS_Store
+
+# Configuracion interna de asistentes de IA
+CLAUDE.md
+.claude/
