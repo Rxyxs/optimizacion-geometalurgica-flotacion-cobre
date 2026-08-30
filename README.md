@@ -4,6 +4,14 @@
 
 # Geometallurgical Optimization for Copper Flotation Plants (Cu/Mo)
 
+[![Python](https://img.shields.io/badge/Python-3.10-3776AB)](https://www.python.org/)
+[![XGBoost](https://img.shields.io/badge/ML-XGBoost%20%7C%20CatBoost-EB5E28)](https://xgboost.readthedocs.io/)
+[![DEAP](https://img.shields.io/badge/optimization-DEAP%20NSGA--II-4C7A3E)](https://deap.readthedocs.io/)
+[![SciPy](https://img.shields.io/badge/optimization-scipy.optimize-8A5A2C)](https://scipy.org/)
+[![SHAP](https://img.shields.io/badge/explainability-SHAP-2C5F8A)](https://shap.readthedocs.io/)
+[![FastAPI](https://img.shields.io/badge/API-FastAPI-009688)](https://fastapi.tiangolo.com/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)
+
 Automated *end-to-end* system designed to predict and optimize Copper (Cu) and Molybdenum (Mo) recovery in flotation processes. The project combines geological block-model data with real-time cell telemetry to address metal losses in tailings.
 
 It applies signal processing to clean plant sensor noise, trains a *multi-output* gradient-boosting ensemble, and runs a prescriptive engine based on genetic algorithms that recommends exact reagent and pH adjustments for complex mineralogical blocks. It closes its final phase with a *forward-looking* simulation of plant operating variables (head grade, pH, reagents), validated with leak-free walk-forward ensembles, plus a second, independent constrained-optimization path via `scipy.optimize` that is cross-validated against the genetic algorithm. The full flow (ingestion, feature engineering, modeling, optimization — genetic and constrained —, plant simulation, and SHAP explainability) runs end to end from a single command (`python -m src.master_pipeline`).
@@ -16,7 +24,31 @@ air, % solids), and identify — for blocks with predicted Cu recovery below
 the business threshold (82%) — the operational adjustment that maximizes
 recovery without exceeding the reagent budget.
 
+## 📈 Business Impact & Key Performance Indicators
+
+| Metric | Result | What it means |
+|---|---|---|
+| Cu recovery model | RMSE 4.08, R² 0.648 | Walk-forward validated (`TimeSeriesSplit`), no lookahead |
+| At-risk blocks identified | 9,644 / 50,000 (19.3%) | Blocks predicted below the 82% Cu recovery business threshold |
+| Single-objective optimizer uplift | **+27.6 pp** average Cu recovery | On the 150 worst-recovery blocks, within the 0.22 USD/t reagent budget |
+| Cross-validation, DE vs. Genetic Algorithm | 0.05 pp avg. difference, r=0.9994 | Two independent optimization algorithms converge to the same answer |
+| `SLSQP` failure caught, `differential_evolution` fix | 10/10 silent failures → 40/40 convergences | A real optimizer-choice bug found by checking results, not assumed to work because it "reported success" |
+| Plant simulation, 180-day horizon | 93.78% → 88.48% Cu recovery | Tracks the declining head-grade mine plan, 0.212 pp inter-fold disagreement (leak-free) |
+
 ## 🏗️ Pipeline architecture
+
+```mermaid
+flowchart TD
+    A[data_generator.py<br/>50k synthetic blocks] --> B["wrangling.py<br/>Kalman filter + KDTree + Isolation Forest"]
+    B --> C[feature_engineering.py<br/>mineralogy ratios, SGI, Wavelet]
+    C --> D["modeling.py<br/>XGBoost+CatBoost multi-output"]
+    D --> E1["optimizer.py<br/>Genetic Algorithm + NSGA-II Pareto"]
+    D --> E2["constrained_optimizer.py<br/>scipy differential_evolution"]
+    E1 -.cross-validated.-> E2
+    D --> F[explainability.py<br/>SHAP + dashboard]
+    D --> G["plant_simulation.py<br/>forward-looking, walk-forward"]
+    D -.on demand.-> API[api.py<br/>FastAPI, both engines]
+```
 
 ```
 1. data_generator.py       Synthetic block model + cell telemetry (50k blocks)

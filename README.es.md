@@ -4,6 +4,14 @@
 
 # Optimización Geometalúrgica en Plantas de Flotación (Cu/Mo)
 
+[![Python](https://img.shields.io/badge/Python-3.10-3776AB)](https://www.python.org/)
+[![XGBoost](https://img.shields.io/badge/ML-XGBoost%20%7C%20CatBoost-EB5E28)](https://xgboost.readthedocs.io/)
+[![DEAP](https://img.shields.io/badge/optimizacion-DEAP%20NSGA--II-4C7A3E)](https://deap.readthedocs.io/)
+[![SciPy](https://img.shields.io/badge/optimizacion-scipy.optimize-8A5A2C)](https://scipy.org/)
+[![SHAP](https://img.shields.io/badge/explicabilidad-SHAP-2C5F8A)](https://shap.readthedocs.io/)
+[![FastAPI](https://img.shields.io/badge/API-FastAPI-009688)](https://fastapi.tiangolo.com/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)
+
 Sistema automatizado *end-to-end* diseñado para predecir y optimizar la recuperación de Cobre (Cu) y Molibdeno (Mo) en procesos de flotación. El proyecto cruza información del modelo de bloques geológicos con telemetría de celdas en tiempo real para resolver pérdidas de metal en relaves.
 
 Aplica procesamiento de señales para limpiar el ruido de lectura en planta, entrena un ensamble *multi-output* de gradiente boosting y ejecuta un motor prescriptivo basado en algoritmos genéticos que sugiere ajustes exactos de reactivos y pH para bloques mineralógicos complejos. Cierra su última fase con una simulación *forward-looking* de las variables de planta (ley de cabeza, pH, reactivos), validada con ensambles walk-forward sin fuga de información, y con una segunda vía de optimización restringida vía `scipy.optimize` que se valida cruzadamente contra el algoritmo genético. Todo el flujo (ingesta, ingeniería de variables, modelado, optimización — genética y restringida —, simulación de planta y explicabilidad SHAP) se ejecuta de principio a fin desde un único comando (`python -m src.master_pipeline`).
@@ -17,7 +25,31 @@ los bloques con recuperación de Cu predicha por debajo del umbral de
 negocio (82%)— el ajuste operativo que maximiza la recuperación sin exceder
 el presupuesto de insumos.
 
+## 📈 Impacto de Negocio e Indicadores Clave (KPIs)
+
+| Métrica | Resultado | Qué significa |
+|---|---|---|
+| Modelo de recuperación de Cu | RMSE 4,08, R² 0,648 | Validado walk-forward (`TimeSeriesSplit`), sin lookahead |
+| Bloques en riesgo identificados | 9.644 / 50.000 (19,3%) | Bloques predichos bajo el umbral de negocio de 82% de recuperación de Cu |
+| Uplift del optimizador de objetivo único | **+27,6 pp** de recuperación de Cu promedio | En los 150 bloques de peor recuperación, dentro del presupuesto de 0,22 USD/t |
+| Validación cruzada, DE vs. Algoritmo Genético | 0,05 pp de diferencia promedio, r=0,9994 | Dos algoritmos de optimización independientes convergen a la misma respuesta |
+| Falla de `SLSQP` detectada, corrección con `differential_evolution` | 10/10 fallas silenciosas → 40/40 convergencias | Un bug real de elección de optimizador encontrado revisando resultados, no asumido correcto porque "reportó éxito" |
+| Simulación de planta, horizonte de 180 días | 93,78% → 88,48% recuperación de Cu | Sigue la tendencia de ley de cabeza declinante del plan minero, 0,212 pp de desacuerdo entre folds (sin fuga) |
+
 ## 🏗️ Arquitectura del pipeline
+
+```mermaid
+flowchart TD
+    A[data_generator.py<br/>50k bloques sinteticos] --> B["wrangling.py<br/>Kalman + KDTree + Isolation Forest"]
+    B --> C[feature_engineering.py<br/>ratios mineralogia, SGI, Wavelet]
+    C --> D["modeling.py<br/>XGBoost+CatBoost multi-output"]
+    D --> E1["optimizer.py<br/>Algoritmo Genetico + NSGA-II Pareto"]
+    D --> E2["constrained_optimizer.py<br/>scipy differential_evolution"]
+    E1 -.validado cruzado.-> E2
+    D --> F[explainability.py<br/>SHAP + dashboard]
+    D --> G["plant_simulation.py<br/>forward-looking, walk-forward"]
+    D -.bajo demanda.-> API[api.py<br/>FastAPI, ambos motores]
+```
 
 ```
 1. data_generator.py       Block model + telemetría sintética (50k bloques)
