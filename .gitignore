@@ -30,7 +30,3 @@ catboost_info/
 .vscode/
 .idea/
 .DS_Store
-
-# Configuracion interna de asistentes de IA
-CLAUDE.md
-.claude/
