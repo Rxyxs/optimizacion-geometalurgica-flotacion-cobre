@@ -468,3 +468,11 @@ en el pasado y se evalúa en el futuro).
   prediga recuperaciones reales en una faena. El paso crítico antes de
   cualquier uso productivo sigue siendo reemplazar el generador por
   telemetría histórica real (ver "Próximo paso pendiente" arriba).
+
+## Licencia
+
+MIT — ver [LICENSE](LICENSE).
+
+## Autor
+
+**Pablo Reyes** — [github.com/Rxyxs](https://github.com/Rxyxs)

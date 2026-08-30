@@ -463,3 +463,11 @@ the past and evaluates on the future).
   predicts real recoveries at an actual mine site. The critical step
   before any production use remains replacing the generator with real
   historical telemetry (see "Remaining next step" above).
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+## Author
+
+**Pablo Reyes** — [github.com/Rxyxs](https://github.com/Rxyxs)
