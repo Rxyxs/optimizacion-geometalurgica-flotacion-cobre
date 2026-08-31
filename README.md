@@ -175,6 +175,7 @@ python -m src.optimizer             # outputs/reports/{optimization,pareto}_reco
 python -m src.explainability        # outputs/reports/*.json,*.txt + outputs/plots/*.png,*.pdf
 python -m src.plant_simulation      # outputs/reports/plant_simulation_*.{csv,json}
 python -m src.constrained_optimizer # outputs/reports/{constrained_optimization_recommendations,slsqp_vs_de_diagnostic}.csv
+python -m src.deep_modeling         # baseline (Ridge) + MLP (PyTorch, Huber loss, ReLU/GELU/Swish) vs. ensemble -- see "Modeling approaches comparison" below
 ```
 
 ### Notebook: plant simulation + constrained optimization
@@ -417,6 +418,60 @@ the past and evaluates on the future).
   correlation of **0.9994**. Two distinct algorithmic paths reaching the
   same optimum is the strongest validation this project can offer
   without real plant data.
+
+## 🧠 Modeling approaches comparison (baseline vs. ensemble vs. deep learning)
+
+Beyond the production XGBoost+CatBoost ensemble, the repository includes two
+additional, independently trained approaches over the same features/targets
+and the same time-ordered holdout (no leakage), so the ensemble's value can
+be judged against something simpler and against something more expressive:
+
+- **(a) Interpretable baseline** — `Ridge` (linear, standardized features):
+  `python -m src.deep_modeling`.
+- **(b) Tree ensemble (production)** — `XGBoost` + `CatBoost` (`MultiRMSE`),
+  averaged: `python -m src.modeling`.
+- **(c) Deep learning** — PyTorch MLP (2 hidden layers) trained with a
+  **hand-implemented Huber loss** (quadratic near zero, linear for large
+  errors — robust to outlier recovery readings), sweeping activations
+  **ReLU / GELU / Swish (SiLU)**.
+
+| Approach | Target | RMSE | MAE | R² |
+|---|---|---|---|---|
+| Ridge (baseline) | Cu recovery % | 5.35 | 4.05 | 0.466 |
+| Ridge (baseline) | Mo recovery % | 5.06 | 4.06 | 0.608 |
+| MLP + Huber (ReLU) | Cu recovery % | 5.76 | 4.28 | 0.380 |
+| MLP + Huber (ReLU) | Mo recovery % | 5.01 | 3.99 | 0.617 |
+| MLP + Huber (GELU) | Cu recovery % | 5.87 | 4.38 | 0.356 |
+| MLP + Huber (GELU) | Mo recovery % | 5.09 | 4.07 | 0.604 |
+| MLP + Huber (Swish) | Cu recovery % | 6.04 | 4.48 | 0.319 |
+| MLP + Huber (Swish) | Mo recovery % | 5.14 | 4.10 | 0.596 |
+| **XGBoost+CatBoost (production)** | Cu recovery % | **4.08** | **3.06** | **0.648** |
+| **XGBoost+CatBoost (production)** | Mo recovery % | **4.65** | **3.71** | **0.669** |
+
+**Takeaway:** on this tabular, moderately-sized, non-image/non-sequence
+dataset, the tree ensemble beats both the linear baseline and the MLP on
+every metric — the expected result for structured geometallurgical data,
+and the reason the ensemble (not the MLP) is what's served in production
+(`src/api.py`). ReLU is the best-performing activation of the three tested
+here (lowest average RMSE), ahead of GELU and Swish.
+
+Artifacts:
+- `outputs/reports/dl_baseline_comparison.json` — comparison rows (also the
+  source for the table above).
+- `outputs/reports/model_comparison.duckdb` — same rows persisted in DuckDB
+  (table `comparison_metrics`), queryable with `duckdb.connect(...)`.
+- `outputs/models/mlp_<best_activation>.pt` — best MLP's `state_dict`.
+- `outputs/plots/dl_activation_loss_curves.png` — Huber training loss per
+  epoch, one curve per activation.
+- `outputs/plots/dl_predicted_vs_actual.png` — predicted-vs-actual and
+  residual scatter plots (Cu/Mo) for the best-performing activation.
+
+Run it standalone (requires `data/processed/block_model_flotation_features.parquet`,
+i.e. at least `data_generator` → `wrangling` → `feature_engineering` already run):
+
+```powershell
+python -m src.deep_modeling
+```
 
 ## ✅ Conclusions
 
