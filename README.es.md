@@ -473,6 +473,11 @@ Artefactos:
 - `outputs/plots/dl_predicted_vs_actual.png` — dispersión predicho-vs-real
   y residuos (Cu/Mo) para la activación de mejor desempeño.
 
+La versión animada de abajo dibuja progresivamente la curva de loss de cada activación época a época, con una etiqueta flotante que muestra su valor de loss de Huber actual.
+
+![Curvas animadas de loss de Huber por activación](outputs/plots/dl_activation_loss_curves_animated.gif)
+![Curvas de loss de Huber por activación](outputs/plots/dl_activation_loss_curves.png)
+
 Ejecutar de forma independiente (requiere
 `data/processed/block_model_flotation_features.parquet`, es decir al menos
 `data_generator` → `wrangling` → `feature_engineering` ya corridos):

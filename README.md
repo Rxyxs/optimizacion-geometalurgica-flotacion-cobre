@@ -466,6 +466,11 @@ Artifacts:
 - `outputs/plots/dl_predicted_vs_actual.png` — predicted-vs-actual and
   residual scatter plots (Cu/Mo) for the best-performing activation.
 
+The animated version below races each activation's loss curve across epochs, with a floating label tracking its current Huber loss value.
+
+![Animated Huber loss curves per activation](outputs/plots/dl_activation_loss_curves_animated.gif)
+![Huber loss curves per activation](outputs/plots/dl_activation_loss_curves.png)
+
 Run it standalone (requires `data/processed/block_model_flotation_features.parquet`,
 i.e. at least `data_generator` → `wrangling` → `feature_engineering` already run):
 

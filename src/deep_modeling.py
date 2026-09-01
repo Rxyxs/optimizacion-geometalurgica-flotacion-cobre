@@ -25,6 +25,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
 import numpy as np
 import polars as pl
 import torch
@@ -228,6 +229,71 @@ def save_loss_curves_plot(activation_histories: dict[str, list[float]]) -> Path:
     return path
 
 
+def save_loss_curves_animation(activation_histories: dict[str, list[float]], max_frames: int = 60) -> Path:
+    """Version animada ('racing line chart') de `save_loss_curves_plot`: cada linea de
+    loss se dibuja progresivamente frame a frame, con una etiqueta flotante en la punta
+    de cada curva mostrando la activacion y el valor de loss actual. Usa el mismo
+    `loss_history` real (Huber, por epoca) ya calculado en el entrenamiento -- sin
+    datos inventados."""
+    activations = list(activation_histories.keys())
+    n_epochs = len(next(iter(activation_histories.values())))
+    n_frames = min(max_frames, n_epochs)
+    # Indices de epoca (reales) a revelar en cada frame, submuestreando si hay mas
+    # epocas que frames deseados.
+    frame_epoch_idx = np.unique(
+        np.linspace(1, n_epochs, n_frames, dtype=int)
+    )
+
+    plt.style.use("dark_background")
+    fig, ax = plt.subplots(figsize=(12, 6))
+
+    all_losses = np.concatenate([np.array(h) for h in activation_histories.values()])
+    ax.set_xlim(1, n_epochs)
+    ax.set_ylim(0, float(all_losses.max()) * 1.1)
+    ax.set_title("MLP -- Curva de loss (Huber custom) por activacion", fontsize=13, fontweight="bold")
+    ax.set_xlabel("Epoca")
+    ax.set_ylabel("Loss de Huber (entrenamiento)")
+
+    lines = {}
+    labels = {}
+    for activation, color in zip(activations, COLOR_LOSS):
+        (line,) = ax.plot([], [], label=activation.upper(), color=color, linewidth=2)
+        lines[activation] = line
+        labels[activation] = ax.annotate(
+            "",
+            xy=(0, 0),
+            xytext=(10, 0),
+            textcoords="offset points",
+            fontsize=9,
+            color="white",
+            va="center",
+            bbox=dict(boxstyle="round,pad=0.3", fc=color, ec="white", alpha=0.85),
+        )
+    ax.legend(loc="upper right")
+    fig.tight_layout()
+
+    def _update(frame_idx: int):
+        up_to = int(frame_epoch_idx[frame_idx])
+        for activation, history in activation_histories.items():
+            x = np.arange(1, up_to + 1)
+            y = np.array(history[:up_to])
+            lines[activation].set_data(x, y)
+            current_val = history[up_to - 1]
+            labels[activation].xy = (up_to, current_val)
+            labels[activation].set_position((10, 0))
+            labels[activation].set_text(f"{activation.upper()}: {current_val:.3f}")
+        return list(lines.values()) + list(labels.values())
+
+    ani = FuncAnimation(fig, _update, frames=len(frame_epoch_idx), interval=150, blit=False)
+
+    PLOTS_DIR.mkdir(parents=True, exist_ok=True)
+    path = PLOTS_DIR / "dl_activation_loss_curves_animated.gif"
+    ani.save(path, writer="pillow")
+    plt.close(fig)
+    plt.style.use("default")
+    return path
+
+
 def save_predicted_vs_actual_plot(y_test: np.ndarray, y_pred: np.ndarray, target_names: list[str], best_activation: str) -> Path:
     fig, axes = plt.subplots(2, 2, figsize=(13, 11))
     fig.suptitle(f"MLP ({best_activation.upper()}) -- Predicho vs. Real y Residuos", fontsize=14, fontweight="bold")
@@ -310,10 +376,12 @@ def main() -> None:
 
     loss_histories = {a: r["loss_history"] for a, r in dl_results.items()}
     loss_plot_path = save_loss_curves_plot(loss_histories)
+    loss_gif_path = save_loss_curves_animation(loss_histories)
     pred_plot_path = save_predicted_vs_actual_plot(
         y_test, dl_results[best_activation]["y_pred"], TARGET_COLUMNS, best_activation
     )
     print(f"Grafico de curvas de loss: {loss_plot_path}")
+    print(f"Animacion de curvas de loss: {loss_gif_path}")
     print(f"Grafico predicho-vs-real: {pred_plot_path}")
 
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
