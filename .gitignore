@@ -19,6 +19,8 @@ outputs/reports/*
 !outputs/reports/.gitkeep
 outputs/plots/*
 !outputs/plots/.gitkeep
+!outputs/plots/*.png
+!outputs/plots/*.gif
 
 # CatBoost training logs
 catboost_info/
