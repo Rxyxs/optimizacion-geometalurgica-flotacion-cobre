@@ -1,0 +1,20 @@
+# Line-ending normalization.
+#
+# This repository is developed on Windows but built and tested on Linux in CI,
+# so Git stores every text file as LF and checks it out as LF everywhere.
+# Without this, the same file flips between CRLF and LF depending on which
+# machine committed it, producing diffs that are pure noise and masking the
+# real change underneath.
+* text=auto eol=lf
+
+# cmd.exe is the one consumer that genuinely needs CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Never apply text handling to these.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
